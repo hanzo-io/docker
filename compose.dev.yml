@@ -1,0 +1,92 @@
+# Hanzo AI Platform - Local Development Override
+# Compose Specification: https://compose-spec.io/
+#
+# Usage: docker compose -f docker/compose.yml -f docker/compose.dev.yml up
+
+name: hanzo-platform-dev
+
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: hanzo_dev_pass
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  gateway:
+    build:
+      context: ../gateway
+      dockerfile: docker/Dockerfile
+      target: development
+    environment:
+      NODE_ENV: development
+      FREE_TIER_REQUESTS_PER_MINUTE: 1000  # Relaxed for dev
+      ENABLE_LOCAL_NODE: "false"
+    volumes:
+      - ../gateway:/app
+      - /app/node_modules
+    ports:
+      - "3001:3001"
+      - "9091:9091"
+    command: npm run dev
+
+  platform:
+    build:
+      context: ../platform
+      dockerfile: docker/Dockerfile
+      target: development
+    environment:
+      NODE_ENV: development
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+      NEXT_PUBLIC_GATEWAY_URL: http://localhost:3001
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: dev-secret-not-for-production
+    volumes:
+      - ../platform:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "3000:3000"
+    command: npm run dev
+
+  # Skip Caddy in dev, use direct ports
+  caddy:
+    profiles:
+      - disabled
+
+  # Optional: Enable with --profile monitoring
+  prometheus:
+    ports:
+      - "9090:9090"
+
+  grafana:
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    ports:
+      - "3003:3000"
+
+  # Dev inference node (CPU only)
+  hanzo-node:
+    build:
+      context: ../node
+      dockerfile: Dockerfile
+    environment:
+      DEVICE: cpu
+      MODEL_PATH: /models/qwen3-0.6b-q4_k_m.gguf  # Smaller model for dev
+    volumes:
+      - ${HOME}/models:/models:ro
+      - ../node:/app
+    ports:
+      - "8000:8000"
+      - "9093:9093"
+    profiles:
+      - inference
+
+networks:
+  hanzo-internal:
+    internal: false  # Allow external in dev

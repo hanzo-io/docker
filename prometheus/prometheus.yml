@@ -1,0 +1,96 @@
+# Prometheus Configuration for Hanzo AI Platform
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  
+  external_labels:
+    cluster: 'hanzo-platform'
+    environment: 'production'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+# Load rules once and periodically evaluate them
+rule_files:
+  # - "rules/*.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: 'prometheus'
+
+  # PostgreSQL
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres:5432']
+        labels:
+          service: 'postgres'
+
+  # Redis
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+        labels:
+          service: 'redis'
+
+  # Gateway service
+  - job_name: 'gateway'
+    static_configs:
+      - targets: ['gateway:9091']
+        labels:
+          service: 'gateway'
+          tier: 'free'
+    scrape_interval: 10s
+
+  # Platform service
+  - job_name: 'platform'
+    static_configs:
+      - targets: ['platform:3000']
+        labels:
+          service: 'platform'
+    metrics_path: '/api/metrics'
+    scrape_interval: 30s
+
+  # Nexus orchestrator
+  - job_name: 'nexus'
+    static_configs:
+      - targets: ['nexus:9092']
+        labels:
+          service: 'nexus'
+    scrape_interval: 10s
+
+  # Hanzo Node inference
+  - job_name: 'hanzo-node'
+    static_configs:
+      - targets: ['hanzo-node:9093']
+        labels:
+          service: 'hanzo-node'
+          type: 'inference'
+    scrape_interval: 15s
+    scrape_timeout: 30s  # Inference can be slow
+
+  # Caddy metrics
+  - job_name: 'caddy'
+    static_configs:
+      - targets: ['caddy:2019']
+        labels:
+          service: 'caddy'
+    metrics_path: '/metrics'
+
+  # Docker engine (if exposed)
+  - job_name: 'docker'
+    static_configs:
+      - targets: ['host.docker.internal:9323']
+        labels:
+          service: 'docker'
+    scheme: http
+    # Requires Docker daemon to expose metrics

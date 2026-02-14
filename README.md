@@ -1,90 +1,311 @@
-[![Build Stable](https://github.com/frappe/frappe_docker/actions/workflows/build_stable.yml/badge.svg)](https://github.com/frappe/frappe_docker/actions/workflows/build_stable.yml)
-[![Build Develop](https://github.com/frappe/frappe_docker/actions/workflows/build_develop.yml/badge.svg)](https://github.com/frappe/frappe_docker/actions/workflows/build_develop.yml)
+# Hanzo AI Platform - Docker Deployment
 
-Everything about [Frappe](https://github.com/frappe/frappe) and [ERPNext](https://github.com/frappe/erpnext) in containers.
+Production-ready Docker Compose deployment for Hanzo AI Platform.
 
-# Getting Started
+## 🚀 Quick Start
 
-To get started you need [Docker](https://docs.docker.com/get-docker/), [docker-compose](https://docs.docker.com/compose/), and [git](https://docs.github.com/en/get-started/getting-started-with-git/set-up-git) setup on your machine. For Docker basics and best practices refer to Docker's [documentation](http://docs.docker.com).
+### Prerequisites
 
-Once completed, chose one of the following two sections for next steps.
+- Docker Engine 24.0+ with Compose support
+- Domain with DNS configured
+- DigitalOcean droplet (recommended: `s-8vcpu-16gb-amd`)
 
-### Try in Play With Docker
+### Initial Setup
 
-To play in an already set up sandbox, in your browser, click the button below:
+```bash
+# 1. Clone repository
+git clone https://github.com/hanzoai/platform
+cd platform/docker
 
-<a href="https://labs.play-with-docker.com/?stack=https://raw.githubusercontent.com/frappe/frappe_docker/main/pwd.yml">
-  <img src="https://raw.githubusercontent.com/play-with-docker/stacks/master/assets/images/button.png" alt="Try in PWD"/>
-</a>
+# 2. Configure environment
+cp .env.example .env
+vim .env  # Fill in your values
 
-### Try on your Dev environment
-
-First clone the repo:
-
-```sh
-git clone https://github.com/frappe/frappe_docker
-cd frappe_docker
+# 3. Deploy
+./deploy.sh deploy
 ```
 
-Then run: `docker compose -f pwd.yml up -d`
+## 📦 Images
 
-### To run on ARM64 architecture follow this instructions
+Published on Docker Hub:
 
-After cloning the repo run this command to build multi-architecture images specifically for ARM64.
+- `hanzoai/gateway:latest` - Inference proxy (Node.js) ~200MB
+- `hanzoai/platform:latest` - Manager UI (Next.js) ~464MB
+- `hanzoai/nexus:latest` - Orchestrator (Rust) *building*
+- `hanzo-node:latest` - Local inference (Python) *building*
 
-`docker buildx bake --no-cache --set "*.platform=linux/arm64"`
+## 🏗️ Architecture
 
-and then
+```
+                    Internet
+                       │
+                       ↓
+                    Caddy (443)
+                    ↙     ↘
+        Platform (3000)  Gateway (3001)
+                ↓            ↓
+            PostgreSQL    Redis
+                ↓            ↓
+            Nexus (8080)  Hanzo-Node (8000)
+```
 
-- add `platform: linux/arm64` to all services in the `pwd.yml`
-- replace the current specified versions of erpnext image on `pwd.yml` with `:latest`
+## 🔧 Configuration
 
-Then run: `docker compose -f pwd.yml up -d`
+### Environment Variables
 
-## Final steps
+Required:
+- `DOMAIN` - Your domain (e.g., hanzo.ai)
+- `ACME_EMAIL` - Email for Let's Encrypt
+- `POSTGRES_PASSWORD` - Database password
+- `NEXTAUTH_SECRET` - Auth secret (32+ chars)
+- `GRAFANA_PASSWORD` - Grafana admin password
 
-Wait for 5 minutes for ERPNext site to be created or check `create-site` container logs before opening browser on port 8080. (username: `Administrator`, password: `admin`)
+Optional:
+- `DIGITALOCEAN_API_KEY` - For DO integration
+- `DEEPSEEK_API_KEY` - DeepSeek provider
+- `OPENAI_API_KEY` - OpenAI provider
+- `ANTHROPIC_API_KEY` - Anthropic provider
 
-If you ran in a Dev Docker environment, to view container logs: `docker compose -f pwd.yml logs -f create-site`. Don't worry about some of the initial error messages, some services take a while to become ready, and then they go away.
+See [.env.example](.env.example) for full list.
 
-# Documentation
+### Domains
 
-### [Frequently Asked Questions](https://github.com/frappe/frappe_docker/wiki/Frequently-Asked-Questions)
+Configure DNS A records:
+```
+platform.hanzo.ai → YOUR_SERVER_IP
+gateway.hanzo.ai  → YOUR_SERVER_IP
+api.hanzo.ai      → YOUR_SERVER_IP
+metrics.hanzo.ai  → YOUR_SERVER_IP
+```
 
-### [Production](#production)
+## 🚢 Deployment
 
-- [List of containers](docs/list-of-containers.md)
-- [Single Compose Setup](docs/single-compose-setup.md)
-- [Environment Variables](docs/environment-variables.md)
-- [Single Server Example](docs/single-server-example.md)
-- [Setup Options](docs/setup-options.md)
-- [Site Operations](docs/site-operations.md)
-- [Backup and Push Cron Job](docs/backup-and-push-cronjob.md)
-- [Port Based Multi Tenancy](docs/port-based-multi-tenancy.md)
-- [Migrate from multi-image setup](docs/migrate-from-multi-image-setup.md)
-- [running on linux/mac](docs/setup_for_linux_mac.md)
-- [TLS for local deployment](docs/tls-for-local-deployment.md)
+### Core Services
 
-### [Custom Images](#custom-images)
+```bash
+./deploy.sh deploy
+```
 
-- [Custom Apps](docs/custom-apps.md)
-- [Custom Apps with podman](docs/custom-apps-podman.md)
-- [Build Version 10 Images](docs/build-version-10-images.md)
+Deploys:
+- PostgreSQL (database)
+- Redis (cache)
+- Gateway (inference proxy)
+- Platform (management UI)
+- Caddy (reverse proxy + SSL)
 
-### [Development](#development)
+### Optional Services
 
-- [Development using containers](docs/development.md)
-- [Bench Console and VSCode Debugger](docs/bench-console-and-vscode-debugger.md)
-- [Connect to localhost services](docs/connect-to-localhost-services-from-containers-for-local-app-development.md)
+#### Monitoring
 
-### [Troubleshoot](docs/troubleshoot.md)
+```bash
+./deploy.sh monitoring
+```
 
-# Contributing
+Adds:
+- Prometheus (metrics)
+- Grafana (dashboards)
 
-If you want to contribute to this repo refer to [CONTRIBUTING.md](CONTRIBUTING.md)
+Access: `https://metrics.hanzo.ai`
 
-This repository is only for container related stuff. You also might want to contribute to:
+#### Local Inference
 
-- [Frappe framework](https://github.com/frappe/frappe#contributing),
-- [ERPNext](https://github.com/frappe/erpnext#contributing),
-- [Frappe Bench](https://github.com/frappe/bench).
+```bash
+./deploy.sh inference
+```
+
+Adds:
+- Hanzo-Node (local LLM inference)
+
+Requires:
+- GPU (NVIDIA) or CPU with 16GB+ RAM
+- Model files in `/models` volume
+
+## 📊 Management
+
+### View Status
+
+```bash
+./deploy.sh status
+```
+
+### View Logs
+
+```bash
+# All services
+./deploy.sh logs
+
+# Specific service
+./deploy.sh logs gateway
+
+# Follow
+docker compose -f compose.yml logs -f
+```
+
+### Restart Service
+
+```bash
+./deploy.sh restart gateway
+./deploy.sh restart platform
+```
+
+### Stop All
+
+```bash
+./deploy.sh stop
+```
+
+### Remove All
+
+```bash
+./deploy.sh down
+```
+
+## 🔨 Development
+
+### Local Development
+
+```bash
+# Start with dev overrides
+docker compose -f compose.yml -f compose.dev.yml up
+
+# Or manually
+cd ..
+make dev-gateway    # Terminal 1
+make dev-platform   # Terminal 2
+```
+
+### Build Custom Images
+
+```bash
+# Gateway
+cd ../gateway
+docker build -f docker/Dockerfile -t hanzoai/gateway:custom .
+
+# Platform
+cd ../platform
+docker build -f docker/Dockerfile -t hanzoai/platform:custom .
+
+# Use custom images
+docker compose -f compose.yml up -d
+```
+
+## 📈 Scaling
+
+### Horizontal Scaling
+
+```bash
+# Scale gateway to 5 replicas
+docker compose -f compose.yml up -d --scale gateway=5
+
+# Scale platform to 3 replicas
+docker compose -f compose.yml up -d --scale platform=3
+```
+
+### Resource Limits
+
+Edit `compose.yml`:
+
+```yaml
+services:
+  gateway:
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+```
+
+## 🔒 Security
+
+### SSL Certificates
+
+Caddy automatically provisions Let's Encrypt certificates.
+
+View certificates:
+```bash
+docker compose -f compose.yml exec caddy caddy trust
+```
+
+### Secrets Management
+
+Never commit `.env` to git. Use:
+
+```bash
+# Docker secrets (Swarm)
+echo "my-password" | docker secret create db_password -
+
+# Or environment variables
+export POSTGRES_PASSWORD="$(openssl rand -base64 32)"
+```
+
+### Firewall
+
+```bash
+# UFW
+sudo ufw allow 22/tcp   # SSH
+sudo ufw allow 80/tcp   # HTTP
+sudo ufw allow 443/tcp  # HTTPS
+sudo ufw enable
+```
+
+## 🐛 Troubleshooting
+
+### Service Unhealthy
+
+```bash
+# Check logs
+docker compose -f compose.yml logs gateway
+
+# Restart service
+docker compose -f compose.yml restart gateway
+
+# Force recreate
+docker compose -f compose.yml up -d --force-recreate gateway
+```
+
+### Database Connection Issues
+
+```bash
+# Check PostgreSQL
+docker compose -f compose.yml exec postgres pg_isready -U hanzo
+
+# View connections
+docker compose -f compose.yml exec postgres psql -U hanzo -c "SELECT * FROM pg_stat_activity;"
+```
+
+### Redis Connection Issues
+
+```bash
+# Check Redis
+docker compose -f compose.yml exec redis redis-cli ping
+
+# View info
+docker compose -f compose.yml exec redis redis-cli info
+```
+
+### SSL Certificate Issues
+
+```bash
+# Check Caddy logs
+docker compose -f compose.yml logs caddy
+
+# Force renewal
+docker compose -f compose.yml exec caddy caddy reload --force
+```
+
+## 📚 Additional Resources
+
+- [Compose Specification](https://compose-spec.io/)
+- [Caddy Documentation](https://caddyserver.com/docs/)
+- [Docker Best Practices](https://docs.docker.com/develop/dev-best-practices/)
+- [Let's Encrypt](https://letsencrypt.org/)
+
+## 🆘 Support
+
+- GitHub Issues: https://github.com/hanzoai/platform/issues
+- Discord: https://discord.gg/hanzoai
+- Email: support@hanzo.ai
+
+## 📝 License
+
+MIT License - see LICENSE file for details.

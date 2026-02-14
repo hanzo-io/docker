@@ -1,0 +1,123 @@
+# Application Server (F Server) - Backend Services
+version: '3.8'
+
+x-backend-defaults: &backend_defaults
+  image: ${HANZO_IMAGE:-frappe/erpnext}:${VERSION:-latest}
+  platform: linux/amd64
+  restart: unless-stopped
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+    - logs:/home/frappe/frappe-bench/logs
+  environment:
+    - FRAPPE_SITE_NAME_HEADER=${FRAPPE_SITE_NAME_HEADER}
+  depends_on:
+    configurator:
+      condition: service_completed_successfully
+
+services:
+  configurator:
+    image: ${HANZO_IMAGE:-frappe/erpnext}:${VERSION:-latest}
+    platform: linux/amd64
+    container_name: hanzo-configurator
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        ls -1 apps > sites/apps.txt
+        bench set-config -g db_host ${DB_HOST}
+        bench set-config -gp db_port ${DB_PORT:-3306}
+        bench set-config -g redis_cache "redis://${REDIS_CACHE_HOST}:${REDIS_CACHE_PORT:-6379}"
+        bench set-config -g redis_queue "redis://${REDIS_QUEUE_HOST}:${REDIS_QUEUE_PORT:-6380}"
+        bench set-config -g redis_socketio "redis://${REDIS_QUEUE_HOST}:${REDIS_QUEUE_PORT:-6380}"
+        bench set-config -gp socketio_port 9000
+        echo "Configuration completed"
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT:-3306}
+      REDIS_CACHE_HOST: ${REDIS_CACHE_HOST}
+      REDIS_CACHE_PORT: ${REDIS_CACHE_PORT:-6379}
+      REDIS_QUEUE_HOST: ${REDIS_QUEUE_HOST}
+      REDIS_QUEUE_PORT: ${REDIS_QUEUE_PORT:-6380}
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    restart: "no"
+
+  backend:
+    <<: *backend_defaults
+    container_name: hanzo-backend
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/method/frappe.ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  websocket:
+    <<: *backend_defaults
+    container_name: hanzo-websocket
+    command: node /home/frappe/frappe-bench/apps/frappe/socketio.js
+    ports:
+      - "${WEBSOCKET_PORT:-9000}:9000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/socket.io/?EIO=4&transport=polling || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  queue-short:
+    <<: *backend_defaults
+    container_name: hanzo-queue-short
+    command: bench worker --queue short,default
+
+  queue-long:
+    <<: *backend_defaults
+    container_name: hanzo-queue-long
+    command: bench worker --queue long,default,short
+
+  scheduler:
+    <<: *backend_defaults
+    container_name: hanzo-scheduler
+    command: bench schedule
+
+  # Optional: Create site service (run once)
+  create-site:
+    <<: *backend_defaults
+    container_name: hanzo-create-site
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        if [ ! -f sites/${SITE_NAME}/site_config.json ]; then
+          bench new-site ${SITE_NAME} \
+            --no-mariadb-socket \
+            --db-root-password ${DB_ROOT_PASSWORD} \
+            --db-name ${DB_NAME} \
+            --db-password ${DB_PASSWORD} \
+            --admin-password ${ADMIN_PASSWORD} \
+            --install-app ${INSTALL_APPS:-erpnext} \
+            --set-default
+          
+          echo "Site ${SITE_NAME} created successfully"
+        else
+          echo "Site ${SITE_NAME} already exists"
+        fi
+    environment:
+      SITE_NAME: ${SITE_NAME:-erp.hanzo.ai}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      DB_NAME: ${DB_NAME:-_hanzo}
+      DB_PASSWORD: ${DB_PASSWORD}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+      INSTALL_APPS: ${INSTALL_APPS:-erpnext}
+    profiles:
+      - setup
+    restart: "no"
+
+volumes:
+  sites:
+    driver: local
+  logs:
+    driver: local
+
+networks:
+  default:
+    name: hanzo-app-network

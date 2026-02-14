@@ -1,0 +1,76 @@
+# Database Server (M Server) - MariaDB + Redis
+version: '3.8'
+
+services:
+  mariadb:
+    image: mariadb:10.11
+    container_name: hanzo-mariadb
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME:-_hanzo}
+      MYSQL_USER: ${DB_USER:-_hanzo}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_HOST: '%'
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./mariadb-conf:/etc/mysql/conf.d
+    ports:
+      - "${DB_PORT:-3306}:3306"
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+      - --skip-innodb-read-only-compressed
+      - --innodb-buffer-pool-size=${INNODB_BUFFER_POOL_SIZE:-512M}
+      - --max-connections=${MAX_CONNECTIONS:-500}
+      - --innodb-file-per-table=1
+      - --innodb-log-file-size=256M
+      - --innodb-strict-mode=0
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  redis-cache:
+    image: redis:7-alpine
+    container_name: hanzo-redis-cache
+    volumes:
+      - redis_cache_data:/data
+    ports:
+      - "${REDIS_CACHE_PORT:-6379}:6379"
+    restart: unless-stopped
+    command: redis-server --maxmemory ${REDIS_MAXMEMORY:-256mb} --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis-queue:
+    image: redis:7-alpine
+    container_name: hanzo-redis-queue
+    volumes:
+      - redis_queue_data:/data
+    ports:
+      - "${REDIS_QUEUE_PORT:-6380}:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  mariadb_data:
+    driver: local
+  redis_cache_data:
+    driver: local
+  redis_queue_data:
+    driver: local
+
+networks:
+  default:
+    name: hanzo-db-network

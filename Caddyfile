@@ -1,0 +1,85 @@
+# Hanzo Platform - Caddy Configuration
+# Automatic HTTPS with Let's Encrypt
+
+{
+	email {$ACME_EMAIL}
+	admin off
+}
+
+# Platform UI
+platform.{$DOMAIN} {
+	reverse_proxy platform:3000 {
+		health_uri /api/health
+		health_interval 30s
+		health_timeout 10s
+	}
+
+	log {
+		output file /var/log/caddy/platform.log
+	}
+
+	encode gzip
+
+	header {
+		# Security headers
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		X-XSS-Protection "1; mode=block"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+}
+
+# Gateway API
+api.{$DOMAIN}, gateway.{$DOMAIN} {
+	reverse_proxy gateway:3001 {
+		health_uri /health
+		health_interval 15s
+		health_timeout 5s
+
+		# Load balancing
+		lb_policy round_robin
+		lb_try_duration 5s
+	}
+
+	log {
+		output file /var/log/caddy/gateway.log
+	}
+
+	encode gzip
+
+	# Rate limiting (basic)
+	@ratelimit {
+		path /v1/*
+	}
+	handle @ratelimit {
+		header {
+			X-RateLimit-Limit "100"
+			X-RateLimit-Window "3600"
+		}
+		reverse_proxy gateway:3001
+	}
+}
+
+# Metrics (Optional - monitoring profile)
+metrics.{$DOMAIN} {
+	reverse_proxy prometheus:9090
+
+	log {
+		output file /var/log/caddy/metrics.log
+	}
+
+	# Basic auth for metrics
+	basic_auth {
+		admin $2a$14$Zkx19XLiW6VYouLHR5NmfOFU0z2GTNmpkT/5qqR7hx4wHXs0l5.9i
+	}
+}
+
+# Grafana (Optional - monitoring profile)
+grafana.{$DOMAIN} {
+	reverse_proxy grafana:3000
+
+	log {
+		output file /var/log/caddy/grafana.log
+	}
+}

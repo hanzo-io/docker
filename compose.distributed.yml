@@ -1,0 +1,348 @@
+#Human: Hanzo Platform - Distributed Cloud Architecture
+# Deploy with: docker stack deploy -c compose.distributed.yml hanzo
+#
+# Manager Node: Platform UI + Gateway + Infrastructure
+# Worker Nodes: hanzo-node inference workers (auto-deployed via UI)
+
+version: '3.8'
+
+services:
+  # Traefik - Reverse Proxy with HTTPS
+  traefik:
+    image: traefik:v3.2
+    command:
+      - --api.dashboard=true
+      - --providers.docker=true
+      - --providers.docker.swarmMode=true
+      - --providers.docker.exposedByDefault=false
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-admin@hanzo.ai}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+      - --log.level=INFO
+      - --accesslog=true
+    ports:
+      - target: 80
+        published: 80
+        mode: host
+      - target: 443
+        published: 443
+        mode: host
+      - target: 8080
+        published: 8080
+        mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_letsencrypt:/letsencrypt
+      - traefik_config:/etc/traefik/dynamic:ro
+    networks:
+      - hanzo-network
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.traefik.rule=Host(`traefik.${DOMAIN:-hanzo.ai}`)"
+        - "traefik.http.routers.traefik.service=api@internal"
+        - "traefik.http.routers.traefik.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.traefik.entrypoints=websecure"
+        - "traefik.http.services.traefik.loadbalancer.server.port=8080"
+
+  # PostgreSQL - Database (Manager only)
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: hanzo
+      POSTGRES_USER: hanzo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - hanzo-network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hanzo"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis - Cache & Rate Limiting (Manager only)
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 2gb --maxmemory-policy allkeys-lru
+    networks:
+      - hanzo-network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Hanzo Platform - Manager UI
+  platform:
+    image: hanzoai/platform:latest
+    environment:
+      - DATABASE_URL=postgresql://hanzo:${POSTGRES_PASSWORD}@postgres:5432/hanzo
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - NEXTAUTH_URL=https://${DOMAIN:-platform.hanzo.ai}
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - NODE_ENV=production
+
+      # DigitalOcean Integration
+      - DIGITALOCEAN_API_KEY=${DIGITALOCEAN_API_KEY}
+
+      # Provider API Keys
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+      # Node Orchestration
+      - ENABLE_NODE_ORCHESTRATION=true
+      - NODE_REGION=${NODE_REGION:-sfo3}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - platform_data:/app/data
+    networks:
+      - hanzo-network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.platform.rule=Host(`platform.${DOMAIN:-hanzo.ai}`)"
+        - "traefik.http.routers.platform.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.platform.entrypoints=websecure"
+        - "traefik.http.services.platform.loadbalancer.server.port=3000"
+        - "traefik.http.services.platform.loadbalancer.healthcheck.path=/api/health"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Hanzo Gateway - Free Tier Inference Proxy
+  gateway:
+    image: hanzoai/gateway:latest
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - DATABASE_URL=postgresql://hanzo:${POSTGRES_PASSWORD}@postgres:5432/hanzo_gateway
+
+      # Rate Limits
+      - FREE_TIER_REQUESTS_PER_MINUTE=10
+      - FREE_TIER_REQUESTS_PER_HOUR=100
+      - FREE_TIER_REQUESTS_PER_DAY=500
+      - FREE_TIER_TOKENS_PER_DAY=50000
+
+      # Proxy settings
+      - TRUST_PROXY=true
+
+      # Provider API Keys
+      - DIGITALOCEAN_API_KEY=${DIGITALOCEAN_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+      # Local nodes
+      - ENABLE_LOCAL_NODES=true
+      - NODE_DISCOVERY=swarm
+      - NODE_SERVICE_NAME=hanzo-node
+    networks:
+      - hanzo-network
+    deploy:
+      mode: replicated
+      replicas: 2  # Load balanced
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.gateway.rule=Host(`api.${DOMAIN:-hanzo.ai}`) || Host(`gateway.${DOMAIN:-hanzo.ai}`)"
+        - "traefik.http.routers.gateway.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.gateway.entrypoints=websecure"
+        - "traefik.http.services.gateway.loadbalancer.server.port=3001"
+        - "traefik.http.services.gateway.loadbalancer.healthcheck.path=/health"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # Hanzo Node - LLM Inference Workers
+  # Deployed to worker nodes with type=inference label
+  hanzo-node:
+    image: hanzoai/node:latest
+    environment:
+      - PORT=8000
+      - NODE_TYPE=inference
+      - SWARM_MODE=true
+      - ENABLE_GPU=false  # Override with GPU nodes
+
+      # Model configuration
+      - MODEL_TYPE=qwen3
+      - QUANTIZATION=q4_k_m
+      - MAX_CONTEXT=8192
+      - DEVICE=cpu  # or cuda for GPU nodes
+    volumes:
+      - hanzo_models:/models:ro
+      - hanzo_node_cache:/cache
+    networks:
+      - hanzo-network
+    deploy:
+      mode: replicated
+      replicas: 0  # Start with 0, scale via UI
+      placement:
+        constraints:
+          - node.labels.type == inference
+      restart_policy:
+        condition: on-failure
+        delay: 30s
+      resources:
+        limits:
+          memory: 14G  # Leave 2GB for system
+        reservations:
+          memory: 8G
+      update_config:
+        parallelism: 1
+        delay: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Prometheus - Metrics Collection (Optional)
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - hanzo-network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.metrics.rule=Host(`metrics.${DOMAIN:-hanzo.ai}`)"
+        - "traefik.http.routers.metrics.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.metrics.entrypoints=websecure"
+        - "traefik.http.services.metrics.loadbalancer.server.port=9090"
+    profiles:
+      - monitoring
+
+  # Grafana - Monitoring Dashboard (Optional)
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_SERVER_ROOT_URL=https://grafana.${DOMAIN:-hanzo.ai}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - hanzo-network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.grafana.rule=Host(`grafana.${DOMAIN:-hanzo.ai}`)"
+        - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.grafana.entrypoints=websecure"
+        - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+    profiles:
+      - monitoring
+
+networks:
+  hanzo-network:
+    driver: overlay
+    attachable: true
+    ipam:
+      config:
+        - subnet: 10.10.0.0/16
+
+volumes:
+  postgres_data:
+    driver: local
+  platform_data:
+    driver: local
+  traefik_letsencrypt:
+    driver: local
+  traefik_config:
+    driver: local
+  hanzo_models:
+    driver: local
+  hanzo_node_cache:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local

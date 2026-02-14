@@ -1,0 +1,99 @@
+# Traefik Dynamic Configuration
+# Place in /opt/hanzo/docker/traefik/dynamic/ on manager node
+
+http:
+  routers:
+    # Platform UI
+    platform:
+      rule: "Host(`platform.hanzo.ai`)"
+      service: platform
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+
+    # Gateway API
+    gateway:
+      rule: "Host(`api.hanzo.ai`) || Host(`gateway.hanzo.ai`)"
+      service: gateway
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+
+    # Prometheus Metrics (optional)
+    metrics:
+      rule: "Host(`metrics.hanzo.ai`)"
+      service: metrics
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      middlewares:
+        - auth
+
+    # Grafana Dashboard (optional)
+    grafana:
+      rule: "Host(`grafana.hanzo.ai`)"
+      service: grafana
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+
+  services:
+    platform:
+      loadBalancer:
+        servers:
+          - url: "http://platform:3000"
+        healthCheck:
+          path: "/api/health"
+          interval: "30s"
+          timeout: "10s"
+
+    gateway:
+      loadBalancer:
+        servers:
+          - url: "http://gateway:3001"
+        healthCheck:
+          path: "/health"
+          interval: "15s"
+          timeout: "5s"
+
+    metrics:
+      loadBalancer:
+        servers:
+          - url: "http://prometheus:9090"
+
+    grafana:
+      loadBalancer:
+        servers:
+          - url: "http://grafana:3000"
+
+  middlewares:
+    # Basic auth for monitoring endpoints
+    auth:
+      basicAuth:
+        users:
+          # Default: admin:admin (change in production)
+          # Generated with: htpasswd -nb admin admin
+          - "admin:$apr1$H6uskkkW$IgXLP6ewTrSuBkTrqE8wj/"
+
+    # Security headers
+    securityHeaders:
+      headers:
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        forceSTSHeader: true
+        frameDeny: true
+        contentTypeNosniff: true
+        browserXssFilter: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+
+    # Rate limiting
+    rateLimit:
+      rateLimit:
+        average: 100
+        period: 1m
+        burst: 50

@@ -1,0 +1,74 @@
+# Proxy Server (N Server) - Nginx Frontend
+version: '3.8'
+
+services:
+  nginx:
+    image: ${HANZO_IMAGE:-frappe/erpnext}:${VERSION:-latest}
+    platform: linux/amd64
+    container_name: hanzo-nginx
+    command: nginx-entrypoint.sh
+    environment:
+      BACKEND: ${BACKEND_HOST}:${BACKEND_PORT:-8000}
+      SOCKETIO: ${WEBSOCKET_HOST}:${WEBSOCKET_PORT:-9000}
+      FRAPPE_SITE_NAME_HEADER: ${FRAPPE_SITE_NAME_HEADER:-$$host}
+      UPSTREAM_REAL_IP_ADDRESS: ${UPSTREAM_REAL_IP_ADDRESS:-127.0.0.1}
+      UPSTREAM_REAL_IP_HEADER: ${UPSTREAM_REAL_IP_HEADER:-X-Forwarded-For}
+      UPSTREAM_REAL_IP_RECURSIVE: ${UPSTREAM_REAL_IP_RECURSIVE:-off}
+      PROXY_READ_TIMEOUT: ${PROXY_READ_TIMEOUT:-120}
+      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-50m}
+      # Additional security headers
+      X_FRAME_OPTIONS: ${X_FRAME_OPTIONS:-SAMEORIGIN}
+      X_CONTENT_TYPE_OPTIONS: ${X_CONTENT_TYPE_OPTIONS:-nosniff}
+      X_XSS_PROTECTION: ${X_XSS_PROTECTION:-1; mode=block}
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites:ro
+      - nginx_cache:/var/cache/nginx
+      - nginx_logs:/var/log/nginx
+    ports:
+      - "${HTTP_PORT:-80}:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      - sites-sync
+
+  # Optional: Sync sites volume from app server
+  sites-sync:
+    image: alpine:latest
+    container_name: hanzo-sites-sync
+    command: ["sh", "-c", "echo 'Sites volume ready for mounting'"]
+    volumes:
+      - sites:/sites
+    restart: "no"
+
+  # Optional: Log rotation
+  logrotate:
+    image: blacklabelops/logrotate:latest
+    container_name: hanzo-logrotate
+    environment:
+      LOGS_DIRECTORIES: /var/log/nginx
+      LOGROTATE_INTERVAL: daily
+      LOGROTATE_COPIES: 7
+      LOGROTATE_SIZE: 10M
+      LOGROTATE_COMPRESSION: compress
+    volumes:
+      - nginx_logs:/var/log/nginx
+    restart: unless-stopped
+    profiles:
+      - production
+
+volumes:
+  sites:
+    driver: local
+  nginx_cache:
+    driver: local
+  nginx_logs:
+    driver: local
+
+networks:
+  default:
+    name: hanzo-proxy-network

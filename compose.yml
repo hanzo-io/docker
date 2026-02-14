@@ -1,0 +1,408 @@
+# Hanzo AI Platform - Production Deployment
+# Compose Specification: https://compose-spec.io/
+#
+# Deploy: docker compose -f docker/compose.yml up -d
+# Scale: docker compose -f docker/compose.yml up -d --scale gateway=3
+# Logs: docker compose -f docker/compose.yml logs -f
+#
+# Images:
+#   - hanzoai/gateway:latest - Inference proxy (Node.js)
+#   - hanzoai/platform:latest - Manager UI (Next.js)
+#   - hanzoai/nexus:latest - Orchestrator (Rust)
+#   - hanzo-node:latest - Local inference (Python)
+
+name: hanzo-platform
+
+services:
+  # PostgreSQL - Primary database
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hanzo
+      POSTGRES_USER: hanzo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+      POSTGRES_INITDB_ARGS: --encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - postgres_backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hanzo"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+    networks:
+      - hanzo-internal
+
+  # Redis - Cache & rate limiting
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes --appendfsync everysec --maxmemory 1gb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    networks:
+      - hanzo-internal
+
+  # Hanzo Gateway - Free tier inference proxy
+  gateway:
+    image: hanzoai/gateway:latest
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      
+      # Database
+      DATABASE_URL: postgresql://hanzo:${POSTGRES_PASSWORD}@postgres:5432/hanzo_gateway
+      
+      # Redis
+      REDIS_URL: redis://redis:6379
+      
+      # Free tier limits
+      FREE_TIER_REQUESTS_PER_MINUTE: 10
+      FREE_TIER_REQUESTS_PER_HOUR: 100
+      FREE_TIER_REQUESTS_PER_DAY: 500
+      FREE_TIER_TOKENS_PER_DAY: 50000
+      
+      # Trust proxy headers (behind Caddy)
+      TRUST_PROXY: "true"
+      
+      # Provider API keys
+      # Primary: DigitalOcean + Gradient AI for inference
+      DIGITALOCEAN_API_KEY: ${DIGITALOCEAN_API_KEY:?DIGITALOCEAN_API_KEY required}
+      GRADIENT_AI_ENDPOINT: ${GRADIENT_AI_ENDPOINT:-https://api.gradient.ai/v1}
+      
+      # Optional: Additional providers for fallback
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      
+      # Local node integration (disabled by default - requires GPU)
+      LOCAL_NODE_URL: http://hanzo-node:8000
+      ENABLE_LOCAL_NODE: ${ENABLE_LOCAL_NODE:-false}
+      
+      # Monitoring
+      ENABLE_METRICS: "true"
+      METRICS_PORT: 9091
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+    networks:
+      - hanzo-internal
+      - hanzo-public
+
+  # Hanzo Platform - Management UI
+  platform:
+    image: hanzoai/platform:latest
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      
+      # Database
+      DATABASE_URL: postgresql://hanzo:${POSTGRES_PASSWORD}@postgres:5432/hanzo_platform
+      
+      # API endpoints
+      NEXT_PUBLIC_API_URL: https://api.hanzo.ai
+      NEXT_PUBLIC_GATEWAY_URL: https://gateway.hanzo.ai
+      
+      # Auth
+      NEXTAUTH_URL: https://platform.hanzo.ai
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?NEXTAUTH_SECRET required}
+      
+      # Stripe
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+    networks:
+      - hanzo-internal
+      - hanzo-public
+
+  # Hanzo Nexus - Request orchestrator (optional, build pending)
+  nexus:
+    image: hanzoai/nexus:latest
+    restart: unless-stopped
+    environment:
+      RUST_LOG: info,nexus=debug
+      
+      # Database
+      DATABASE_URL: postgresql://hanzo:${POSTGRES_PASSWORD}@postgres:5432/hanzo_nexus
+      
+      # Redis
+      REDIS_URL: redis://redis:6379
+      
+      # Services
+      GATEWAY_URL: http://gateway:3001
+      NODE_URLS: http://hanzo-node:8000
+      
+      # Monitoring
+      ENABLE_METRICS: "true"
+      METRICS_PORT: 9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 512M
+    networks:
+      - hanzo-internal
+    profiles:
+      - nexus
+
+  # Hanzo Node - Local LLM inference (REQUIRES GPU - optional future enhancement)
+  # This service provides local model inference but requires GPU hardware
+  # The gateway works WITHOUT this by routing to external APIs (OpenAI, Anthropic, etc.)
+  hanzo-node:
+    image: hanzo-node:latest
+    restart: unless-stopped
+    environment:
+      MODEL_PATH: /models/qwen3-32b-q4_k_m.gguf
+      DEVICE: cuda  # Requires NVIDIA GPU
+      MAX_CONTEXT: 8192
+      PORT: 8000
+      
+      # Model config
+      MODEL_TYPE: qwen3
+      QUANTIZATION: q4_k_m
+      
+      # Monitoring
+      ENABLE_METRICS: "true"
+      METRICS_PORT: 9093
+    volumes:
+      - hanzo_models:/models:ro
+      - hanzo_node_cache:/cache
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8000/health"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: '8'
+          memory: 16G
+        reservations:
+          cpus: '4'
+          memory: 8G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - hanzo-internal
+    profiles:
+      - inference  # Only deploy with: docker compose --profile inference up
+
+  # Caddy - Reverse proxy with automatic HTTPS
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"  # HTTP/3
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      DOMAIN: ${DOMAIN:-hanzo.ai}
+      EMAIL: ${ACME_EMAIL:-admin@hanzo.ai}
+    depends_on:
+      - platform
+      - gateway
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    networks:
+      - hanzo-public
+
+  # Prometheus - Metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    networks:
+      - hanzo-internal
+    profiles:
+      - monitoring
+
+  # Grafana - Metrics visualization
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?GRAFANA_PASSWORD required}
+      GF_DATABASE_TYPE: postgres
+      GF_DATABASE_HOST: postgres:5432
+      GF_DATABASE_NAME: hanzo_grafana
+      GF_DATABASE_USER: hanzo
+      GF_DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+      GF_SERVER_ROOT_URL: https://metrics.hanzo.ai
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    networks:
+      - hanzo-internal
+      - hanzo-public
+    profiles:
+      - monitoring
+
+volumes:
+  postgres_data:
+    driver: local
+  postgres_backups:
+    driver: local
+  redis_data:
+    driver: local
+  hanzo_models:
+    driver: local
+  hanzo_node_cache:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  hanzo-internal:
+    driver: bridge
+    internal: true
+  hanzo-public:
+    driver: bridge

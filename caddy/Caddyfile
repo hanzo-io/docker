@@ -1,0 +1,130 @@
+# Hanzo AI Platform - Caddy Configuration
+# Automatic HTTPS with Let's Encrypt
+
+{
+    email {$EMAIL}
+    
+    # Global options
+    admin off
+    auto_https on
+    
+    # Compression
+    encode gzip zstd
+    
+    # Security headers
+    header {
+        # Enable HSTS
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        
+        # Prevent clickjacking
+        X-Frame-Options "SAMEORIGIN"
+        
+        # XSS protection
+        X-Content-Type-Options "nosniff"
+        X-XSS-Protection "1; mode=block"
+        
+        # CSP
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline';"
+        
+        # Referrer policy
+        Referrer-Policy "strict-origin-when-cross-origin"
+        
+        # Remove server info
+        -Server
+    }
+}
+
+# Platform UI
+platform.{$DOMAIN} {
+    reverse_proxy platform:3000 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        
+        # Health check
+        health_uri /api/health
+        health_interval 30s
+        health_timeout 10s
+        
+        # Load balancing
+        lb_policy round_robin
+        lb_try_duration 30s
+        lb_try_interval 5s
+    }
+    
+    # Logging
+    log {
+        output file /var/log/caddy/platform.log {
+            roll_size 100mb
+            roll_keep 5
+            roll_keep_for 720h
+        }
+    }
+}
+
+# Gateway API
+gateway.{$DOMAIN} {
+    reverse_proxy gateway:3001 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        
+        # Health check
+        health_uri /health
+        health_interval 30s
+        health_timeout 10s
+        
+        # Load balancing
+        lb_policy round_robin
+        lb_try_duration 30s
+        lb_try_interval 5s
+    }
+    
+    # Rate limiting
+    rate_limit {
+        zone gateway {
+            key {remote_host}
+            events 100
+            window 1m
+        }
+    }
+    
+    # Logging
+    log {
+        output file /var/log/caddy/gateway.log {
+            roll_size 100mb
+            roll_keep 5
+            roll_keep_for 720h
+        }
+    }
+}
+
+# Main API (alias for gateway)
+api.{$DOMAIN} {
+    redir https://gateway.{$DOMAIN}{uri} permanent
+}
+
+# Metrics (protected)
+metrics.{$DOMAIN} {
+    basicauth {
+        admin {$METRICS_PASSWORD_HASH}
+    }
+    
+    reverse_proxy grafana:3000 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+}
+
+# Prometheus (internal only, not exposed)
+# Access via SSH tunnel: ssh -L 9090:localhost:9090 user@server
+
+# Root domain redirect
+{$DOMAIN} {
+    redir https://platform.{$DOMAIN}{uri} permanent
+}
+
+www.{$DOMAIN} {
+    redir https://platform.{$DOMAIN}{uri} permanent
+}
